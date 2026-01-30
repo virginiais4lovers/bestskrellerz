@@ -3,7 +3,7 @@
 // Disable static generation - WASM SDK requires browser environment
 export const dynamic = 'force-dynamic';
 
-import { useState, useEffect, Suspense } from 'react';
+import { useState, useEffect, useMemo, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import BookCard from '@/components/BookCard';
 import { useMotherDuck, escapeSQL } from '@/hooks/useMotherDuck';
@@ -38,7 +38,7 @@ function BrowseContent() {
 
   const [lists, setLists] = useState<BestSellerList[]>([]);
   const [rankings, setRankings] = useState<BookWithRanking[]>([]);
-  const [availableDates, setAvailableDates] = useState<string[]>([]);
+  const [allDates, setAllDates] = useState<string[]>([]);
   const [currentDate, setCurrentDate] = useState<string | null>(null);
   const [pagination, setPagination] = useState({ page: 1, pageSize: 15, total: 0, totalPages: 0 });
   const [isLoading, setIsLoading] = useState(true);
@@ -47,7 +47,25 @@ function BrowseContent() {
 
   const selectedList = searchParams.get('list') || '';
   const selectedDate = searchParams.get('date') || 'latest';
+  const selectedYear = searchParams.get('year') || '';
   const page = parseInt(searchParams.get('page') || '1', 10);
+
+  // Extract unique years from all dates
+  const availableYears = useMemo(() => {
+    const years = new Set<number>();
+    allDates.forEach(date => {
+      const year = new Date(date).getFullYear();
+      if (!isNaN(year)) years.add(year);
+    });
+    return Array.from(years).sort((a, b) => b - a); // Sort descending
+  }, [allDates]);
+
+  // Filter dates by selected year
+  const filteredDates = useMemo(() => {
+    if (!selectedYear) return allDates.slice(0, 52); // Show latest 52 weeks if no year selected
+    const yearNum = parseInt(selectedYear, 10);
+    return allDates.filter(date => new Date(date).getFullYear() === yearNum);
+  }, [allDates, selectedYear]);
 
   // Fetch lists on mount
   useEffect(() => {
@@ -71,6 +89,30 @@ function BrowseContent() {
     fetchLists();
   }, [isReady, query]);
 
+  // Fetch all available dates when list changes
+  useEffect(() => {
+    if (!isReady || !selectedList) {
+      setAllDates([]);
+      return;
+    }
+
+    const fetchDates = async () => {
+      try {
+        const datesResult = await query<{ published_date: string }>(`
+          SELECT DISTINCT published_date::VARCHAR as published_date
+          FROM nyt_bestsellers.main.all_rankings
+          WHERE list_name = '${escapeSQL(selectedList)}'
+          ORDER BY published_date DESC
+        `);
+        setAllDates(datesResult.map(d => d.published_date));
+      } catch (err) {
+        console.error('Failed to fetch dates:', err);
+      }
+    };
+
+    fetchDates();
+  }, [isReady, query, selectedList]);
+
   // Fetch rankings when list or date changes
   useEffect(() => {
     if (!isReady || !selectedList) {
@@ -86,26 +128,25 @@ function BrowseContent() {
         const pageSize = 15;
         const offset = (page - 1) * pageSize;
 
-        // Use all_rankings view for unified access to API + historical data
+        // Determine which date to use
         let dateToUse = selectedDate;
 
         if (selectedDate === 'latest') {
-          const latestResult = await query<{ max_date: string }>(`
-            SELECT MAX(published_date)::VARCHAR as max_date
-            FROM nyt_bestsellers.main.all_rankings
-            WHERE list_name = '${escapeSQL(selectedList)}'
-          `);
-          dateToUse = latestResult[0]?.max_date || '';
+          // If year is selected, use latest date from that year
+          if (selectedYear && filteredDates.length > 0) {
+            dateToUse = filteredDates[0];
+          } else if (allDates.length > 0) {
+            dateToUse = allDates[0];
+          } else {
+            const latestResult = await query<{ max_date: string }>(`
+              SELECT MAX(published_date)::VARCHAR as max_date
+              FROM nyt_bestsellers.main.all_rankings
+              WHERE list_name = '${escapeSQL(selectedList)}'
+            `);
+            dateToUse = latestResult[0]?.max_date || '';
+          }
         }
 
-        // Get available dates for this list (no limit - hardcover fiction has ~4900 weeks since 1931)
-        const datesResult = await query<{ published_date: string }>(`
-          SELECT DISTINCT published_date::VARCHAR as published_date
-          FROM nyt_bestsellers.main.all_rankings
-          WHERE list_name = '${escapeSQL(selectedList)}'
-          ORDER BY published_date DESC
-        `);
-        setAvailableDates(datesResult.map(d => d.published_date));
         setCurrentDate(dateToUse);
 
         // Get total count
@@ -118,7 +159,6 @@ function BrowseContent() {
         const total = countResult[0]?.total || 0;
 
         // Get rankings from unified view
-        // Join with books table to get additional details when available
         const rankingsData = await query<BookWithRanking>(`
           SELECT
             COALESCE(b.primary_isbn13, ar.isbn, '') as primary_isbn13,
@@ -160,7 +200,7 @@ function BrowseContent() {
     };
 
     fetchRankings();
-  }, [isReady, query, selectedList, selectedDate, page]);
+  }, [isReady, query, selectedList, selectedDate, selectedYear, filteredDates, allDates, page]);
 
   const handleListChange = (list: string) => {
     const params = new URLSearchParams();
@@ -168,9 +208,18 @@ function BrowseContent() {
     router.push(`/browse?${params.toString()}`);
   };
 
+  const handleYearChange = (year: string) => {
+    const params = new URLSearchParams();
+    params.set('list', selectedList);
+    if (year) params.set('year', year);
+    // Reset to latest when year changes
+    router.push(`/browse?${params.toString()}`);
+  };
+
   const handleDateChange = (date: string) => {
     const params = new URLSearchParams();
     params.set('list', selectedList);
+    if (selectedYear) params.set('year', selectedYear);
     if (date !== 'latest') params.set('date', date);
     router.push(`/browse?${params.toString()}`);
   };
@@ -178,6 +227,7 @@ function BrowseContent() {
   const handlePageChange = (newPage: number) => {
     const params = new URLSearchParams();
     params.set('list', selectedList);
+    if (selectedYear) params.set('year', selectedYear);
     if (selectedDate !== 'latest') params.set('date', selectedDate);
     if (newPage > 1) params.set('page', newPage.toString());
     router.push(`/browse?${params.toString()}`);
@@ -234,30 +284,52 @@ function BrowseContent() {
           </select>
         </div>
 
-        {/* Date Selector */}
-        {selectedList && availableDates.length > 0 && (
-          <div>
-            <label htmlFor="date-select" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-              Select Date ({availableDates.length} weeks available)
-            </label>
-            <select
-              id="date-select"
-              value={selectedDate === 'latest' ? availableDates[0] : selectedDate}
-              onChange={(e) => handleDateChange(e.target.value)}
-              className="w-full px-4 py-3 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 text-gray-900 dark:text-white touch-manipulation"
-              style={{ minHeight: '44px' }}
-            >
-              {availableDates.map((date) => (
-                <option key={date} value={date}>
-                  {new Date(date).toLocaleDateString('en-US', {
-                    weekday: 'short',
-                    year: 'numeric',
-                    month: 'short',
-                    day: 'numeric'
-                  })}
-                </option>
-              ))}
-            </select>
+        {/* Year and Week Selectors */}
+        {selectedList && availableYears.length > 0 && (
+          <div className="grid grid-cols-2 gap-4">
+            {/* Year Selector */}
+            <div>
+              <label htmlFor="year-select" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                Year
+              </label>
+              <select
+                id="year-select"
+                value={selectedYear}
+                onChange={(e) => handleYearChange(e.target.value)}
+                className="w-full px-4 py-3 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 text-gray-900 dark:text-white touch-manipulation"
+                style={{ minHeight: '44px' }}
+              >
+                <option value="">All years</option>
+                {availableYears.map((year) => (
+                  <option key={year} value={year}>
+                    {year}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Week Selector */}
+            <div>
+              <label htmlFor="date-select" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                Week ({filteredDates.length} available)
+              </label>
+              <select
+                id="date-select"
+                value={selectedDate === 'latest' ? (filteredDates[0] || '') : selectedDate}
+                onChange={(e) => handleDateChange(e.target.value)}
+                className="w-full px-4 py-3 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 text-gray-900 dark:text-white touch-manipulation"
+                style={{ minHeight: '44px' }}
+              >
+                {filteredDates.map((date) => (
+                  <option key={date} value={date}>
+                    {new Date(date).toLocaleDateString('en-US', {
+                      month: 'short',
+                      day: 'numeric'
+                    })}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
         )}
       </div>
