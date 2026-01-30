@@ -57,7 +57,7 @@ function BrowseContent() {
       try {
         const listsData = await query<BestSellerList>(`
           SELECT list_name_encoded, display_name
-          FROM nyt_bestsellers.main.bestseller_lists
+          FROM nyt_bestsellers.main.lists
           ORDER BY display_name
         `);
         setLists(listsData);
@@ -202,7 +202,7 @@ function BrowseContent() {
               l.display_name
             FROM nyt_bestsellers.main.rankings r
             JOIN nyt_bestsellers.main.books b ON r.primary_isbn13 = b.primary_isbn13
-            LEFT JOIN nyt_bestsellers.main.bestseller_lists l ON r.list_name_encoded = l.list_name_encoded
+            LEFT JOIN nyt_bestsellers.main.lists l ON r.list_name_encoded = l.list_name_encoded
             WHERE r.list_name_encoded = '${escapeSQL(selectedList)}'
             AND r.published_date = '${escapeSQL(dateToUse)}'
             ORDER BY r.rank

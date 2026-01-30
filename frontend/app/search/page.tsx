@@ -102,7 +102,7 @@ function SearchContent() {
             STRING_AGG(DISTINCT l.display_name, ', ') as lists
           FROM nyt_bestsellers.main.books b
           LEFT JOIN nyt_bestsellers.main.rankings r ON b.primary_isbn13 = r.primary_isbn13
-          LEFT JOIN nyt_bestsellers.main.bestseller_lists l ON r.list_name_encoded = l.list_name_encoded
+          LEFT JOIN nyt_bestsellers.main.lists l ON r.list_name_encoded = l.list_name_encoded
           WHERE LOWER(b.title) LIKE '%${escapedQuery.toLowerCase()}%'
           OR LOWER(b.author) LIKE '%${escapedQuery.toLowerCase()}%'
           GROUP BY b.primary_isbn13, b.primary_isbn10, b.title, b.author, b.publisher, b.description, b.book_image, b.amazon_product_url

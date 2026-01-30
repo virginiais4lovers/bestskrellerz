@@ -77,7 +77,7 @@ export default function Home() {
           l.display_name
         FROM nyt_bestsellers.main.rankings r
         JOIN nyt_bestsellers.main.books b ON r.primary_isbn13 = b.primary_isbn13
-        LEFT JOIN nyt_bestsellers.main.bestseller_lists l ON r.list_name_encoded = l.list_name_encoded
+        LEFT JOIN nyt_bestsellers.main.lists l ON r.list_name_encoded = l.list_name_encoded
         WHERE r.published_date = '${escapeSQL(latestDate)}'
         ORDER BY RANDOM()
         LIMIT 1
@@ -97,7 +97,7 @@ export default function Home() {
           r.rank,
           r.published_date::VARCHAR as published_date
         FROM nyt_bestsellers.main.rankings r
-        LEFT JOIN nyt_bestsellers.main.bestseller_lists l ON r.list_name_encoded = l.list_name_encoded
+        LEFT JOIN nyt_bestsellers.main.lists l ON r.list_name_encoded = l.list_name_encoded
         WHERE r.primary_isbn13 = '${escapeSQL(book.primary_isbn13)}'
         ORDER BY r.published_date DESC
         LIMIT 10
