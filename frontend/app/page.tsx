@@ -47,10 +47,11 @@ export default function Home() {
     setError(null);
 
     try {
-      // Get latest date
+      // Get latest date for Hardcover Fiction
       const latestResult = await query<{ max_date: string }>(`
         SELECT MAX(published_date)::VARCHAR as max_date
         FROM nyt_bestsellers.main.rankings
+        WHERE list_name_encoded = 'hardcover-fiction'
       `);
 
       const latestDate = latestResult[0]?.max_date;
@@ -79,6 +80,7 @@ export default function Home() {
         JOIN nyt_bestsellers.main.books b ON r.primary_isbn13 = b.primary_isbn13
         LEFT JOIN nyt_bestsellers.main.lists l ON r.list_name_encoded = l.list_name_encoded
         WHERE r.published_date = '${escapeSQL(latestDate)}'
+        AND r.list_name_encoded = 'hardcover-fiction'
         ORDER BY RANDOM()
         LIMIT 1
       `);
