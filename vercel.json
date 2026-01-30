@@ -1,3 +1,5 @@
 {
-  "rootDirectory": "frontend"
+  "buildCommand": "cd frontend && npm install && npm run build",
+  "installCommand": "echo 'skipping root install'",
+  "outputDirectory": "frontend/.next"
 }
