@@ -1,6 +1,21 @@
 'use client';
 
-import { BookWithRanking } from '@/lib/db';
+interface BookWithRanking {
+  primary_isbn13: string;
+  primary_isbn10: string | null;
+  title: string;
+  author: string;
+  publisher: string;
+  description: string;
+  book_image: string | null;
+  amazon_product_url: string | null;
+  rank: number;
+  rank_last_week: number;
+  weeks_on_list: number;
+  published_date: string;
+  list_name_encoded: string;
+  display_name?: string;
+}
 
 interface BookCardProps {
   book: BookWithRanking;

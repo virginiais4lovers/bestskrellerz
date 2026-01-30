@@ -87,18 +87,18 @@ function SearchContent() {
         // Build WHERE clause based on search type
         let whereClause = '';
         if (searchType === 'title') {
-          whereClause = `LOWER(title) LIKE '%${escapedQuery}%'`;
+          whereClause = `LOWER(ar.title) LIKE '%${escapedQuery}%'`;
         } else if (searchType === 'author') {
-          whereClause = `LOWER(author) LIKE '%${escapedQuery}%'`;
+          whereClause = `LOWER(ar.author) LIKE '%${escapedQuery}%'`;
         } else {
-          whereClause = `(LOWER(title) LIKE '%${escapedQuery}%' OR LOWER(author) LIKE '%${escapedQuery}%')`;
+          whereClause = `(LOWER(ar.title) LIKE '%${escapedQuery}%' OR LOWER(ar.author) LIKE '%${escapedQuery}%')`;
         }
 
         // Search using all_rankings view for unified results (API + historical)
         const countResult = await query<{ total: number }>(`
           SELECT COUNT(*) as total FROM (
-            SELECT DISTINCT title, author
-            FROM nyt_bestsellers.main.all_rankings
+            SELECT DISTINCT ar.title, ar.author
+            FROM nyt_bestsellers.main.all_rankings ar
             WHERE ${whereClause}
           )
         `);
