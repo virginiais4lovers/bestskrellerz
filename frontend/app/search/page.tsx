@@ -10,22 +10,16 @@ import BookCard from '@/components/BookCard';
 import { useMotherDuck, escapeSQL } from '@/hooks/useMotherDuck';
 
 interface SearchResult {
-  primary_isbn13: string;
-  primary_isbn10: string | null;
   title: string;
   author: string;
-  publisher: string;
-  description: string;
+  appearance_count: number;
+  first_appearance: string;
+  last_appearance: string;
+  primary_isbn13: string | null;
+  publisher: string | null;
+  description: string | null;
   book_image: string | null;
   amazon_product_url: string | null;
-  appearance_count: number;
-  lists: string;
-}
-
-interface HistoricalResult {
-  title: string;
-  author: string;
-  appearance_count: number;
 }
 
 interface BookWithRanking {
@@ -45,16 +39,18 @@ interface BookWithRanking {
   display_name?: string;
 }
 
+type SearchType = 'all' | 'title' | 'author';
+
 function SearchContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const { isReady, error: connectionError, query } = useMotherDuck();
 
   const searchQuery = searchParams.get('q') || '';
+  const searchType = (searchParams.get('type') as SearchType) || 'all';
   const page = parseInt(searchParams.get('page') || '1', 10);
 
   const [results, setResults] = useState<SearchResult[]>([]);
-  const [historicalResults, setHistoricalResults] = useState<HistoricalResult[]>([]);
   const [pagination, setPagination] = useState({ page: 1, pageSize: 20, total: 0, totalPages: 0 });
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -63,7 +59,6 @@ function SearchContent() {
   useEffect(() => {
     if (!isReady || !searchQuery || searchQuery.length < 2) {
       setResults([]);
-      setHistoricalResults([]);
       setHasSearched(false);
       return;
     }
@@ -76,36 +71,45 @@ function SearchContent() {
       try {
         const pageSize = 20;
         const offset = (page - 1) * pageSize;
-        const escapedQuery = escapeSQL(searchQuery);
+        const escapedQuery = escapeSQL(searchQuery).toLowerCase();
 
-        // Search in books table
+        // Build WHERE clause based on search type
+        let whereClause = '';
+        if (searchType === 'title') {
+          whereClause = `LOWER(title) LIKE '%${escapedQuery}%'`;
+        } else if (searchType === 'author') {
+          whereClause = `LOWER(author) LIKE '%${escapedQuery}%'`;
+        } else {
+          whereClause = `(LOWER(title) LIKE '%${escapedQuery}%' OR LOWER(author) LIKE '%${escapedQuery}%')`;
+        }
+
+        // Search using all_rankings view for unified results (API + historical)
         const countResult = await query<{ total: number }>(`
-          SELECT COUNT(DISTINCT b.primary_isbn13) as total
-          FROM nyt_bestsellers.main.books b
-          WHERE LOWER(b.title) LIKE '%${escapedQuery.toLowerCase()}%'
-          OR LOWER(b.author) LIKE '%${escapedQuery.toLowerCase()}%'
+          SELECT COUNT(*) as total FROM (
+            SELECT DISTINCT title, author
+            FROM nyt_bestsellers.main.all_rankings
+            WHERE ${whereClause}
+          )
         `);
         const total = countResult[0]?.total || 0;
 
-        // Get book results with appearance count and lists
+        // Get aggregated results
         const searchResults = await query<SearchResult>(`
           SELECT
-            b.primary_isbn13,
-            b.primary_isbn10,
-            b.title,
-            b.author,
-            b.publisher,
-            b.description,
-            b.book_image,
-            b.amazon_product_url,
-            COUNT(DISTINCT r.id) as appearance_count,
-            STRING_AGG(DISTINCT l.display_name, ', ') as lists
-          FROM nyt_bestsellers.main.books b
-          LEFT JOIN nyt_bestsellers.main.rankings r ON b.primary_isbn13 = r.primary_isbn13
-          LEFT JOIN nyt_bestsellers.main.lists l ON r.list_name_encoded = l.list_name_encoded
-          WHERE LOWER(b.title) LIKE '%${escapedQuery.toLowerCase()}%'
-          OR LOWER(b.author) LIKE '%${escapedQuery.toLowerCase()}%'
-          GROUP BY b.primary_isbn13, b.primary_isbn10, b.title, b.author, b.publisher, b.description, b.book_image, b.amazon_product_url
+            ar.title,
+            ar.author,
+            COUNT(*) as appearance_count,
+            MIN(ar.published_date)::VARCHAR as first_appearance,
+            MAX(ar.published_date)::VARCHAR as last_appearance,
+            MAX(b.primary_isbn13) as primary_isbn13,
+            MAX(b.publisher) as publisher,
+            MAX(b.description) as description,
+            MAX(b.book_image) as book_image,
+            MAX(b.amazon_product_url) as amazon_product_url
+          FROM nyt_bestsellers.main.all_rankings ar
+          LEFT JOIN nyt_bestsellers.main.books b ON ar.isbn = b.primary_isbn13
+          WHERE ${whereClause}
+          GROUP BY ar.title, ar.author
           ORDER BY appearance_count DESC
           LIMIT ${pageSize} OFFSET ${offset}
         `);
@@ -117,22 +121,6 @@ function SearchContent() {
           total,
           totalPages: Math.ceil(total / pageSize)
         });
-
-        // Search historical data
-        const historicalSearchResults = await query<HistoricalResult>(`
-          SELECT
-            title,
-            author,
-            COUNT(*) as appearance_count
-          FROM nyt_bestsellers.main.historical_rankings
-          WHERE LOWER(title) LIKE '%${escapedQuery.toLowerCase()}%'
-          OR LOWER(author) LIKE '%${escapedQuery.toLowerCase()}%'
-          GROUP BY title, author
-          ORDER BY appearance_count DESC
-          LIMIT 10
-        `).catch(() => []);
-
-        setHistoricalResults(historicalSearchResults);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Search failed');
       } finally {
@@ -141,31 +129,40 @@ function SearchContent() {
     };
 
     search();
-  }, [isReady, query, searchQuery, page]);
+  }, [isReady, query, searchQuery, searchType, page]);
+
+  const handleSearchTypeChange = (type: SearchType) => {
+    const params = new URLSearchParams();
+    if (searchQuery) params.set('q', searchQuery);
+    if (type !== 'all') params.set('type', type);
+    router.push(`/search?${params.toString()}`);
+  };
 
   const handlePageChange = (newPage: number) => {
     const params = new URLSearchParams();
     params.set('q', searchQuery);
+    if (searchType !== 'all') params.set('type', searchType);
     if (newPage > 1) params.set('page', newPage.toString());
     router.push(`/search?${params.toString()}`);
   };
 
   // Convert SearchResult to BookWithRanking for BookCard
   const toBookWithRanking = (result: SearchResult): BookWithRanking => ({
-    ...result,
+    primary_isbn13: result.primary_isbn13 || '',
+    primary_isbn10: null,
+    title: result.title,
+    author: result.author,
+    publisher: result.publisher || '',
+    description: result.description || '',
+    book_image: result.book_image,
+    amazon_product_url: result.amazon_product_url,
     rank: 0,
     rank_last_week: 0,
     weeks_on_list: result.appearance_count,
     published_date: '',
     list_name_encoded: '',
-    display_name: result.lists ? result.lists.split(', ')[0] : undefined
+    display_name: undefined
   });
-
-  // Parse lists string to array
-  const getListsArray = (lists: string | null): string[] => {
-    if (!lists) return [];
-    return lists.split(', ').filter(Boolean);
-  };
 
   return (
     <div className="px-4 py-6 max-w-2xl mx-auto">
@@ -175,6 +172,23 @@ function SearchContent() {
           Search
         </h1>
         <SearchBar initialQuery={searchQuery} autoFocus={!searchQuery} />
+
+        {/* Search Type Filter */}
+        <div className="flex gap-2 mt-4">
+          {(['all', 'title', 'author'] as SearchType[]).map((type) => (
+            <button
+              key={type}
+              onClick={() => handleSearchTypeChange(type)}
+              className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                searchType === type
+                  ? 'bg-amber-500 text-white'
+                  : 'bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-700'
+              }`}
+            >
+              {type === 'all' ? 'All' : type === 'title' ? 'Title' : 'Author'}
+            </button>
+          ))}
+        </div>
       </header>
 
       {/* Connection Error */}
@@ -211,61 +225,29 @@ function SearchContent() {
           {/* Results count */}
           <p className="text-sm text-gray-600 dark:text-gray-400">
             {pagination.total === 0
-              ? `No results found for "${searchQuery}"`
-              : `Found ${pagination.total} result${pagination.total !== 1 ? 's' : ''} for "${searchQuery}"`
+              ? `No results found for "${searchQuery}"${searchType !== 'all' ? ` in ${searchType}` : ''}`
+              : `Found ${pagination.total} result${pagination.total !== 1 ? 's' : ''} for "${searchQuery}"${searchType !== 'all' ? ` in ${searchType}` : ''}`
             }
           </p>
 
-          {/* API Data Results */}
+          {/* Results */}
           {results.length > 0 && (
             <div className="space-y-4">
-              {results.map((result) => {
-                const listsArray = getListsArray(result.lists);
-                return (
-                  <div key={result.primary_isbn13} className="space-y-2">
-                    <BookCard book={toBookWithRanking(result)} showList={true} />
-                    {listsArray.length > 0 && (
-                      <div className="ml-28 sm:ml-36">
-                        <p className="text-xs text-gray-500 dark:text-gray-400">
-                          Appeared on {result.appearance_count} list{result.appearance_count !== 1 ? 's' : ''}:
-                          {' '}{listsArray.slice(0, 3).join(', ')}
-                          {listsArray.length > 3 && ` +${listsArray.length - 3} more`}
-                        </p>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
-          {/* Historical Results */}
-          {historicalResults.length > 0 && (
-            <div className="mt-8">
-              <h2 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
-                Historical Matches (1931-2020)
-              </h2>
-              <div className="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden">
-                <ul className="divide-y divide-gray-200 dark:divide-gray-700">
-                  {historicalResults.map((result, idx) => (
-                    <li key={idx} className="p-4">
-                      <div className="flex justify-between items-start">
-                        <div>
-                          <h3 className="font-medium text-gray-900 dark:text-white">
-                            {result.title}
-                          </h3>
-                          <p className="text-sm text-gray-600 dark:text-gray-400">
-                            by {result.author}
-                          </p>
-                        </div>
-                        <span className="text-xs bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 px-2 py-1 rounded">
-                          {result.appearance_count} week{result.appearance_count !== 1 ? 's' : ''} on list
+              {results.map((result, idx) => (
+                <div key={`${result.title}-${result.author}-${idx}`} className="space-y-2">
+                  <BookCard book={toBookWithRanking(result)} showList={false} />
+                  <div className="ml-28 sm:ml-36">
+                    <p className="text-xs text-gray-500 dark:text-gray-400">
+                      {result.appearance_count} week{result.appearance_count !== 1 ? 's' : ''} on bestseller lists
+                      {result.first_appearance && result.last_appearance && (
+                        <span className="ml-2">
+                          ({new Date(result.first_appearance).getFullYear()} - {new Date(result.last_appearance).getFullYear()})
                         </span>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              </div>
+                      )}
+                    </p>
+                  </div>
+                </div>
+              ))}
             </div>
           )}
 
@@ -310,7 +292,7 @@ function SearchContent() {
             Search for books by title or author
           </p>
           <p className="text-sm text-gray-500 dark:text-gray-500 mt-1">
-            Enter at least 2 characters to search
+            Includes data from 1931 to present
           </p>
         </div>
       )}
