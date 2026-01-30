@@ -1,5 +1,10 @@
 'use client';
 
+function getProxiedImageUrl(url: string | null): string | null {
+  if (!url) return null;
+  return `/api/image?url=${encodeURIComponent(url)}`;
+}
+
 interface BookWithRanking {
   primary_isbn13: string;
   primary_isbn10: string | null;
@@ -33,7 +38,7 @@ export default function BookCard({ book, showList = false }: BookCardProps) {
       <div className="w-24 sm:w-32 flex-shrink-0 bg-gray-100 dark:bg-gray-700">
         {book.book_image ? (
           <img
-            src={book.book_image}
+            src={getProxiedImageUrl(book.book_image) || ''}
             alt={`Cover of ${book.title}`}
             className="w-full h-full object-cover"
           />
