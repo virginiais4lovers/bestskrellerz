@@ -343,6 +343,131 @@ def import_csv(csv_path: str):
         sys.exit(1)
 
 
+@cli.command("fetch-series")
+@click.option(
+    "--batch-size",
+    default=50,
+    help="Number of titles to query per Wikidata request. Default: 50",
+)
+@click.option(
+    "--max-books",
+    default=0,
+    help="Maximum books to process (0 for all). Default: 0",
+)
+@click.option(
+    "--delay",
+    default=1.0,
+    help="Delay between Wikidata requests in seconds. Default: 1.0",
+)
+def fetch_series(batch_size: int, max_books: int, delay: float):
+    """Fetch series information from Wikidata for fiction books.
+
+    Queries Wikidata by book title to find series membership and position.
+    Only processes books from fiction bestseller lists.
+
+    Examples:
+
+        # Fetch series for all fiction books
+        bestskrellerz fetch-series
+
+        # Test with first 100 books
+        bestskrellerz fetch-series --max-books 100
+    """
+    import time
+    from .wikidata import query_wikidata_batch_by_title
+
+    click.echo("Fetching series information from Wikidata...")
+    click.echo(f"Batch size: {batch_size}")
+    click.echo(f"Delay between requests: {delay}s")
+    click.echo()
+
+    try:
+        conn = db.get_connection()
+
+        # Get fiction books that don't have series info yet
+        fiction_lists = [
+            'hardcover-fiction', 'trade-fiction-paperback', 'e-book-fiction',
+            'combined-print-and-e-book-fiction', 'combined-print-fiction',
+            'mass-market-paperback', 'audio-fiction'
+        ]
+        lists_clause = ", ".join([f"'{l}'" for l in fiction_lists])
+
+        # Get unique titles from fiction lists without series info
+        query = f"""
+            SELECT DISTINCT b.primary_isbn13, b.title
+            FROM books b
+            JOIN rankings r ON b.primary_isbn13 = r.primary_isbn13
+            WHERE r.list_name_encoded IN ({lists_clause})
+            AND b.series_name IS NULL
+            ORDER BY b.title
+        """
+        if max_books > 0:
+            query += f" LIMIT {max_books}"
+
+        result = conn.execute(query).fetchall()
+        books_to_process = [(row[0], row[1]) for row in result]
+
+        click.echo(f"Found {len(books_to_process)} fiction books without series info")
+        click.echo()
+
+        if not books_to_process:
+            click.echo("No books to process.")
+            conn.close()
+            return
+
+        # Process in batches
+        total_found = 0
+        total_processed = 0
+
+        for i in range(0, len(books_to_process), batch_size):
+            batch = books_to_process[i:i + batch_size]
+            titles = [title for _, title in batch]
+            isbn_map = {title: isbn for isbn, title in batch}
+
+            click.echo(f"[{i + 1}-{min(i + batch_size, len(books_to_process))}/{len(books_to_process)}] Querying Wikidata...", nl=False)
+
+            try:
+                results = query_wikidata_batch_by_title(titles)
+                total_processed += len(batch)
+
+                if results:
+                    total_found += len(results)
+                    click.echo(f" found {len(results)} series")
+
+                    # Update database
+                    for title, info in results.items():
+                        isbn = isbn_map.get(title)
+                        if isbn:
+                            conn.execute("""
+                                UPDATE books
+                                SET series_name = ?,
+                                    series_position = ?,
+                                    wikidata_id = ?
+                                WHERE primary_isbn13 = ?
+                            """, [info.series_name, info.series_position, info.wikidata_id, isbn])
+                else:
+                    click.echo(" no series found")
+
+            except Exception as e:
+                click.echo(f" error: {e}")
+
+            # Rate limiting
+            if i + batch_size < len(books_to_process):
+                time.sleep(delay)
+
+        conn.close()
+
+        click.echo()
+        click.echo("=== Fetch Complete ===")
+        click.echo(f"Books processed: {total_processed}")
+        click.echo(f"Series found: {total_found}")
+        click.echo(f"Hit rate: {total_found / total_processed * 100:.1f}%" if total_processed > 0 else "N/A")
+
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
 @cli.command()
 def status():
     """Show sync status and statistics."""
