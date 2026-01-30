@@ -98,13 +98,12 @@ function BrowseContent() {
           dateToUse = latestResult[0]?.max_date || '';
         }
 
-        // Get available dates for this list
+        // Get available dates for this list (no limit - hardcover fiction has ~4900 weeks since 1931)
         const datesResult = await query<{ published_date: string }>(`
           SELECT DISTINCT published_date::VARCHAR as published_date
           FROM nyt_bestsellers.main.all_rankings
           WHERE list_name = '${escapeSQL(selectedList)}'
           ORDER BY published_date DESC
-          LIMIT 200
         `);
         setAvailableDates(datesResult.map(d => d.published_date));
         setCurrentDate(dateToUse);
