@@ -4,35 +4,103 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import SearchBar from '@/components/SearchBar';
 import BookCard from '@/components/BookCard';
-import { BookWithRanking } from '@/lib/db';
+import { useMotherDuck, escapeSQL } from '@/hooks/useMotherDuck';
 
-interface RandomBookResponse {
-  book: BookWithRanking;
-  appearances: {
-    list_name_encoded: string;
-    display_name: string;
-    rank: number;
-    published_date: string;
-  }[];
+interface BookWithRanking {
+  primary_isbn13: string;
+  primary_isbn10: string | null;
+  title: string;
+  author: string;
+  publisher: string;
+  description: string;
+  book_image: string | null;
+  amazon_product_url: string | null;
+  rank: number;
+  rank_last_week: number;
+  weeks_on_list: number;
+  published_date: string;
+  list_name_encoded: string;
+  display_name?: string;
+}
+
+interface Appearance {
+  list_name_encoded: string;
+  display_name: string;
+  rank: number;
+  published_date: string;
 }
 
 export default function Home() {
   const router = useRouter();
-  const [randomBook, setRandomBook] = useState<RandomBookResponse | null>(null);
+  const { isReady, error: connectionError, query } = useMotherDuck();
+  const [randomBook, setRandomBook] = useState<{ book: BookWithRanking; appearances: Appearance[] } | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const fetchRandomBook = async () => {
+    if (!isReady) return;
+
     setIsLoading(true);
     setError(null);
 
     try {
-      const res = await fetch('/api/random');
-      if (!res.ok) {
-        throw new Error('Failed to fetch random book');
+      // Get latest date
+      const latestResult = await query<{ max_date: string }>(`
+        SELECT MAX(published_date)::VARCHAR as max_date
+        FROM nyt_bestsellers.main.rankings
+      `);
+
+      const latestDate = latestResult[0]?.max_date;
+      if (!latestDate) {
+        throw new Error('No data available');
       }
-      const data = await res.json();
-      setRandomBook(data);
+
+      // Get random book
+      const books = await query<BookWithRanking>(`
+        SELECT
+          b.primary_isbn13,
+          b.primary_isbn10,
+          b.title,
+          b.author,
+          b.publisher,
+          b.description,
+          b.book_image,
+          b.amazon_product_url,
+          r.rank,
+          r.rank_last_week,
+          r.weeks_on_list,
+          r.published_date::VARCHAR as published_date,
+          r.list_name_encoded,
+          l.display_name
+        FROM nyt_bestsellers.main.rankings r
+        JOIN nyt_bestsellers.main.books b ON r.primary_isbn13 = b.primary_isbn13
+        LEFT JOIN nyt_bestsellers.main.bestseller_lists l ON r.list_name_encoded = l.list_name_encoded
+        WHERE r.published_date = '${escapeSQL(latestDate)}'
+        ORDER BY RANDOM()
+        LIMIT 1
+      `);
+
+      if (books.length === 0) {
+        throw new Error('No books found');
+      }
+
+      const book = books[0];
+
+      // Get appearances
+      const appearances = await query<Appearance>(`
+        SELECT
+          r.list_name_encoded,
+          l.display_name,
+          r.rank,
+          r.published_date::VARCHAR as published_date
+        FROM nyt_bestsellers.main.rankings r
+        LEFT JOIN nyt_bestsellers.main.bestseller_lists l ON r.list_name_encoded = l.list_name_encoded
+        WHERE r.primary_isbn13 = '${escapeSQL(book.primary_isbn13)}'
+        ORDER BY r.published_date DESC
+        LIMIT 10
+      `);
+
+      setRandomBook({ book, appearances });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong');
     } finally {
@@ -51,6 +119,19 @@ export default function Home() {
           Explore New York Times bestseller lists
         </p>
       </header>
+
+      {/* Connection Status */}
+      {connectionError && (
+        <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg">
+          <p className="text-red-600 dark:text-red-400 text-sm">Connection error: {connectionError}</p>
+        </div>
+      )}
+
+      {!isReady && !connectionError && (
+        <div className="mb-6 p-4 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-800 rounded-lg">
+          <p className="text-amber-600 dark:text-amber-400 text-sm">Connecting to database...</p>
+        </div>
+      )}
 
       {/* Search */}
       <div className="mb-8">
@@ -72,7 +153,7 @@ export default function Home() {
 
         <button
           onClick={fetchRandomBook}
-          disabled={isLoading}
+          disabled={isLoading || !isReady}
           className="flex flex-col items-center justify-center p-6 bg-amber-500 hover:bg-amber-600 rounded-lg shadow-md hover:shadow-lg transition-all touch-manipulation disabled:opacity-50"
           style={{ minHeight: '100px' }}
         >

@@ -4,7 +4,7 @@ import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import SearchBar from '@/components/SearchBar';
 import BookCard from '@/components/BookCard';
-import { BookWithRanking } from '@/lib/db';
+import { useMotherDuck, escapeSQL } from '@/hooks/useMotherDuck';
 
 interface SearchResult {
   primary_isbn13: string;
@@ -16,7 +16,7 @@ interface SearchResult {
   book_image: string | null;
   amazon_product_url: string | null;
   appearance_count: number;
-  lists: string[];
+  lists: string;
 }
 
 interface HistoricalResult {
@@ -25,23 +25,29 @@ interface HistoricalResult {
   appearance_count: number;
 }
 
-interface SearchResponse {
-  results: SearchResult[];
-  historicalResults: HistoricalResult[];
-  pagination: {
-    page: number;
-    pageSize: number;
-    total: number;
-    totalPages: number;
-  };
-  query: string;
+interface BookWithRanking {
+  primary_isbn13: string;
+  primary_isbn10: string | null;
+  title: string;
+  author: string;
+  publisher: string;
+  description: string;
+  book_image: string | null;
+  amazon_product_url: string | null;
+  rank: number;
+  rank_last_week: number;
+  weeks_on_list: number;
+  published_date: string;
+  list_name_encoded: string;
+  display_name?: string;
 }
 
 function SearchContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
+  const { isReady, error: connectionError, query } = useMotherDuck();
 
-  const query = searchParams.get('q') || '';
+  const searchQuery = searchParams.get('q') || '';
   const page = parseInt(searchParams.get('page') || '1', 10);
 
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -52,7 +58,7 @@ function SearchContent() {
   const [hasSearched, setHasSearched] = useState(false);
 
   useEffect(() => {
-    if (!query || query.length < 2) {
+    if (!isReady || !searchQuery || searchQuery.length < 2) {
       setResults([]);
       setHistoricalResults([]);
       setHasSearched(false);
@@ -65,19 +71,65 @@ function SearchContent() {
       setHasSearched(true);
 
       try {
-        const params = new URLSearchParams({
-          q: query,
-          page: page.toString(),
-          pageSize: '20'
+        const pageSize = 20;
+        const offset = (page - 1) * pageSize;
+        const escapedQuery = escapeSQL(searchQuery);
+
+        // Search in books table
+        const countResult = await query<{ total: number }>(`
+          SELECT COUNT(DISTINCT b.primary_isbn13) as total
+          FROM nyt_bestsellers.main.books b
+          WHERE LOWER(b.title) LIKE '%${escapedQuery.toLowerCase()}%'
+          OR LOWER(b.author) LIKE '%${escapedQuery.toLowerCase()}%'
+        `);
+        const total = countResult[0]?.total || 0;
+
+        // Get book results with appearance count and lists
+        const searchResults = await query<SearchResult>(`
+          SELECT
+            b.primary_isbn13,
+            b.primary_isbn10,
+            b.title,
+            b.author,
+            b.publisher,
+            b.description,
+            b.book_image,
+            b.amazon_product_url,
+            COUNT(DISTINCT r.id) as appearance_count,
+            STRING_AGG(DISTINCT l.display_name, ', ') as lists
+          FROM nyt_bestsellers.main.books b
+          LEFT JOIN nyt_bestsellers.main.rankings r ON b.primary_isbn13 = r.primary_isbn13
+          LEFT JOIN nyt_bestsellers.main.bestseller_lists l ON r.list_name_encoded = l.list_name_encoded
+          WHERE LOWER(b.title) LIKE '%${escapedQuery.toLowerCase()}%'
+          OR LOWER(b.author) LIKE '%${escapedQuery.toLowerCase()}%'
+          GROUP BY b.primary_isbn13, b.primary_isbn10, b.title, b.author, b.publisher, b.description, b.book_image, b.amazon_product_url
+          ORDER BY appearance_count DESC
+          LIMIT ${pageSize} OFFSET ${offset}
+        `);
+
+        setResults(searchResults);
+        setPagination({
+          page,
+          pageSize,
+          total,
+          totalPages: Math.ceil(total / pageSize)
         });
 
-        const res = await fetch(`/api/search?${params}`);
-        if (!res.ok) throw new Error('Search failed');
+        // Search historical data
+        const historicalSearchResults = await query<HistoricalResult>(`
+          SELECT
+            title,
+            author,
+            COUNT(*) as appearance_count
+          FROM nyt_bestsellers.main.historical_rankings
+          WHERE LOWER(title) LIKE '%${escapedQuery.toLowerCase()}%'
+          OR LOWER(author) LIKE '%${escapedQuery.toLowerCase()}%'
+          GROUP BY title, author
+          ORDER BY appearance_count DESC
+          LIMIT 10
+        `).catch(() => []);
 
-        const data: SearchResponse = await res.json();
-        setResults(data.results);
-        setHistoricalResults(data.historicalResults);
-        setPagination(data.pagination);
+        setHistoricalResults(historicalSearchResults);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Search failed');
       } finally {
@@ -86,11 +138,11 @@ function SearchContent() {
     };
 
     search();
-  }, [query, page]);
+  }, [isReady, query, searchQuery, page]);
 
   const handlePageChange = (newPage: number) => {
     const params = new URLSearchParams();
-    params.set('q', query);
+    params.set('q', searchQuery);
     if (newPage > 1) params.set('page', newPage.toString());
     router.push(`/search?${params.toString()}`);
   };
@@ -103,8 +155,14 @@ function SearchContent() {
     weeks_on_list: result.appearance_count,
     published_date: '',
     list_name_encoded: '',
-    display_name: result.lists.length > 0 ? result.lists[0] : undefined
+    display_name: result.lists ? result.lists.split(', ')[0] : undefined
   });
+
+  // Parse lists string to array
+  const getListsArray = (lists: string | null): string[] => {
+    if (!lists) return [];
+    return lists.split(', ').filter(Boolean);
+  };
 
   return (
     <div className="px-4 py-6 max-w-2xl mx-auto">
@@ -113,8 +171,22 @@ function SearchContent() {
         <h1 className="text-xl sm:text-2xl font-bold text-gray-900 dark:text-white mb-4">
           Search
         </h1>
-        <SearchBar initialQuery={query} autoFocus={!query} />
+        <SearchBar initialQuery={searchQuery} autoFocus={!searchQuery} />
       </header>
+
+      {/* Connection Error */}
+      {connectionError && (
+        <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg">
+          <p className="text-red-600 dark:text-red-400 text-sm">Connection error: {connectionError}</p>
+        </div>
+      )}
+
+      {/* Connecting */}
+      {!isReady && !connectionError && (
+        <div className="mb-6 p-4 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-800 rounded-lg">
+          <p className="text-amber-600 dark:text-amber-400 text-sm">Connecting to database...</p>
+        </div>
+      )}
 
       {/* Error */}
       {error && (
@@ -136,28 +208,31 @@ function SearchContent() {
           {/* Results count */}
           <p className="text-sm text-gray-600 dark:text-gray-400">
             {pagination.total === 0
-              ? `No results found for "${query}"`
-              : `Found ${pagination.total} result${pagination.total !== 1 ? 's' : ''} for "${query}"`
+              ? `No results found for "${searchQuery}"`
+              : `Found ${pagination.total} result${pagination.total !== 1 ? 's' : ''} for "${searchQuery}"`
             }
           </p>
 
           {/* API Data Results */}
           {results.length > 0 && (
             <div className="space-y-4">
-              {results.map((result) => (
-                <div key={result.primary_isbn13} className="space-y-2">
-                  <BookCard book={toBookWithRanking(result)} showList={true} />
-                  {result.lists.length > 0 && (
-                    <div className="ml-28 sm:ml-36">
-                      <p className="text-xs text-gray-500 dark:text-gray-400">
-                        Appeared on {result.appearance_count} list{result.appearance_count !== 1 ? 's' : ''}:
-                        {' '}{result.lists.slice(0, 3).join(', ')}
-                        {result.lists.length > 3 && ` +${result.lists.length - 3} more`}
-                      </p>
-                    </div>
-                  )}
-                </div>
-              ))}
+              {results.map((result) => {
+                const listsArray = getListsArray(result.lists);
+                return (
+                  <div key={result.primary_isbn13} className="space-y-2">
+                    <BookCard book={toBookWithRanking(result)} showList={true} />
+                    {listsArray.length > 0 && (
+                      <div className="ml-28 sm:ml-36">
+                        <p className="text-xs text-gray-500 dark:text-gray-400">
+                          Appeared on {result.appearance_count} list{result.appearance_count !== 1 ? 's' : ''}:
+                          {' '}{listsArray.slice(0, 3).join(', ')}
+                          {listsArray.length > 3 && ` +${listsArray.length - 3} more`}
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
 

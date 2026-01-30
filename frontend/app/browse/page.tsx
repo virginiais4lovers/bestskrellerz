@@ -3,28 +3,34 @@
 import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import BookCard from '@/components/BookCard';
-import { BestSellerList, BookWithRanking } from '@/lib/db';
+import { useMotherDuck, escapeSQL } from '@/hooks/useMotherDuck';
 
-interface ListsResponse {
-  lists: BestSellerList[];
-  hasHistoricalData: boolean;
+interface BestSellerList {
+  list_name_encoded: string;
+  display_name: string;
 }
 
-interface RankingsResponse {
-  rankings: BookWithRanking[];
-  pagination: {
-    page: number;
-    pageSize: number;
-    total: number;
-    totalPages: number;
-  };
-  date: string | null;
-  availableDates: string[];
+interface BookWithRanking {
+  primary_isbn13: string;
+  primary_isbn10: string | null;
+  title: string;
+  author: string;
+  publisher: string;
+  description: string;
+  book_image: string | null;
+  amazon_product_url: string | null;
+  rank: number;
+  rank_last_week: number;
+  weeks_on_list: number;
+  published_date: string;
+  list_name_encoded: string;
+  display_name?: string;
 }
 
 function BrowseContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
+  const { isReady, error: connectionError, query } = useMotherDuck();
 
   const [lists, setLists] = useState<BestSellerList[]>([]);
   const [hasHistoricalData, setHasHistoricalData] = useState(false);
@@ -42,13 +48,22 @@ function BrowseContent() {
 
   // Fetch lists on mount
   useEffect(() => {
+    if (!isReady) return;
+
     const fetchLists = async () => {
       try {
-        const res = await fetch('/api/lists');
-        if (!res.ok) throw new Error('Failed to fetch lists');
-        const data: ListsResponse = await res.json();
-        setLists(data.lists);
-        setHasHistoricalData(data.hasHistoricalData);
+        const listsData = await query<BestSellerList>(`
+          SELECT list_name_encoded, display_name
+          FROM nyt_bestsellers.main.bestseller_lists
+          ORDER BY display_name
+        `);
+        setLists(listsData);
+
+        // Check for historical data
+        const historicalCheck = await query<{ cnt: number }>(`
+          SELECT COUNT(*) as cnt FROM nyt_bestsellers.main.historical_rankings LIMIT 1
+        `).catch(() => [{ cnt: 0 }]);
+        setHasHistoricalData(historicalCheck[0]?.cnt > 0);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load lists');
       } finally {
@@ -57,11 +72,11 @@ function BrowseContent() {
     };
 
     fetchLists();
-  }, []);
+  }, [isReady, query]);
 
   // Fetch rankings when list or date changes
   useEffect(() => {
-    if (!selectedList) {
+    if (!isReady || !selectedList) {
       setRankings([]);
       return;
     }
@@ -71,21 +86,134 @@ function BrowseContent() {
       setError(null);
 
       try {
-        const params = new URLSearchParams({
-          list: selectedList,
-          date: selectedDate,
-          page: page.toString(),
-          pageSize: '15'
-        });
+        // Check if this is the historical list
+        const isHistorical = selectedList === 'hardcover-fiction-historical';
+        const pageSize = 15;
+        const offset = (page - 1) * pageSize;
 
-        const res = await fetch(`/api/rankings?${params}`);
-        if (!res.ok) throw new Error('Failed to fetch rankings');
+        if (isHistorical) {
+          // Fetch historical data
+          let dateToUse = selectedDate;
 
-        const data: RankingsResponse = await res.json();
-        setRankings(data.rankings);
-        setAvailableDates(data.availableDates);
-        setCurrentDate(data.date);
-        setPagination(data.pagination);
+          if (selectedDate === 'latest') {
+            const latestResult = await query<{ max_week: string }>(`
+              SELECT MAX(week)::VARCHAR as max_week FROM nyt_bestsellers.main.historical_rankings
+            `);
+            dateToUse = latestResult[0]?.max_week || '';
+          }
+
+          // Get available dates (sample of years)
+          const datesResult = await query<{ week: string }>(`
+            SELECT DISTINCT week::VARCHAR as week
+            FROM nyt_bestsellers.main.historical_rankings
+            ORDER BY week DESC
+            LIMIT 100
+          `);
+          setAvailableDates(datesResult.map(d => d.week));
+          setCurrentDate(dateToUse);
+
+          // Get rankings
+          const countResult = await query<{ total: number }>(`
+            SELECT COUNT(*) as total FROM nyt_bestsellers.main.historical_rankings
+            WHERE week = '${escapeSQL(dateToUse)}'
+          `);
+          const total = countResult[0]?.total || 0;
+
+          const rankingsData = await query<BookWithRanking>(`
+            SELECT
+              CAST(title_id AS VARCHAR) as primary_isbn13,
+              NULL as primary_isbn10,
+              title,
+              author,
+              '' as publisher,
+              '' as description,
+              NULL as book_image,
+              NULL as amazon_product_url,
+              rank,
+              0 as rank_last_week,
+              0 as weeks_on_list,
+              week::VARCHAR as published_date,
+              'hardcover-fiction-historical' as list_name_encoded,
+              'Hardcover Fiction (Historical)' as display_name
+            FROM nyt_bestsellers.main.historical_rankings
+            WHERE week = '${escapeSQL(dateToUse)}'
+            ORDER BY rank
+            LIMIT ${pageSize} OFFSET ${offset}
+          `);
+
+          setRankings(rankingsData);
+          setPagination({
+            page,
+            pageSize,
+            total,
+            totalPages: Math.ceil(total / pageSize)
+          });
+        } else {
+          // Fetch current API data
+          let dateToUse = selectedDate;
+
+          if (selectedDate === 'latest') {
+            const latestResult = await query<{ max_date: string }>(`
+              SELECT MAX(published_date)::VARCHAR as max_date
+              FROM nyt_bestsellers.main.rankings
+              WHERE list_name_encoded = '${escapeSQL(selectedList)}'
+            `);
+            dateToUse = latestResult[0]?.max_date || '';
+          }
+
+          // Get available dates
+          const datesResult = await query<{ published_date: string }>(`
+            SELECT DISTINCT published_date::VARCHAR as published_date
+            FROM nyt_bestsellers.main.rankings
+            WHERE list_name_encoded = '${escapeSQL(selectedList)}'
+            ORDER BY published_date DESC
+            LIMIT 52
+          `);
+          setAvailableDates(datesResult.map(d => d.published_date));
+          setCurrentDate(dateToUse);
+
+          // Get total count
+          const countResult = await query<{ total: number }>(`
+            SELECT COUNT(*) as total FROM nyt_bestsellers.main.rankings
+            WHERE list_name_encoded = '${escapeSQL(selectedList)}'
+            AND published_date = '${escapeSQL(dateToUse)}'
+          `);
+          const total = countResult[0]?.total || 0;
+
+          // Get rankings with book details
+          const rankingsData = await query<BookWithRanking>(`
+            SELECT
+              b.primary_isbn13,
+              b.primary_isbn10,
+              b.title,
+              b.author,
+              b.publisher,
+              b.description,
+              b.book_image,
+              b.amazon_product_url,
+              r.rank,
+              r.rank_last_week,
+              r.weeks_on_list,
+              r.published_date::VARCHAR as published_date,
+              r.list_name_encoded,
+              l.display_name
+            FROM nyt_bestsellers.main.rankings r
+            JOIN nyt_bestsellers.main.books b ON r.primary_isbn13 = b.primary_isbn13
+            LEFT JOIN nyt_bestsellers.main.bestseller_lists l ON r.list_name_encoded = l.list_name_encoded
+            WHERE r.list_name_encoded = '${escapeSQL(selectedList)}'
+            AND r.published_date = '${escapeSQL(dateToUse)}'
+            ORDER BY r.rank
+            LIMIT ${pageSize} OFFSET ${offset}
+          `);
+
+          setRankings(rankingsData);
+          setPagination({
+            page,
+            pageSize,
+            total,
+            totalPages: Math.ceil(total / pageSize)
+          });
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load rankings');
       } finally {
@@ -94,7 +222,7 @@ function BrowseContent() {
     };
 
     fetchRankings();
-  }, [selectedList, selectedDate, page]);
+  }, [isReady, query, selectedList, selectedDate, page]);
 
   const handleListChange = (list: string) => {
     const params = new URLSearchParams();
@@ -117,7 +245,7 @@ function BrowseContent() {
     router.push(`/browse?${params.toString()}`);
   };
 
-  if (isLoading) {
+  if (isLoading || !isReady) {
     return (
       <div className="flex items-center justify-center min-h-[50vh]">
         <div className="animate-spin rounded-full h-10 w-10 border-t-2 border-b-2 border-amber-500"></div>
@@ -133,6 +261,13 @@ function BrowseContent() {
           Browse Bestsellers
         </h1>
       </header>
+
+      {/* Connection Error */}
+      {connectionError && (
+        <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-lg">
+          <p className="text-red-600 dark:text-red-400 text-sm">Connection error: {connectionError}</p>
+        </div>
+      )}
 
       {/* Filters */}
       <div className="space-y-4 mb-6">
