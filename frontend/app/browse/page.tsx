@@ -28,6 +28,7 @@ interface BookWithRanking {
   published_date: string;
   list_name_encoded: string;
   display_name?: string;
+  source?: string;
 }
 
 function BrowseContent() {
@@ -36,7 +37,6 @@ function BrowseContent() {
   const { isReady, error: connectionError, query } = useMotherDuck();
 
   const [lists, setLists] = useState<BestSellerList[]>([]);
-  const [hasHistoricalData, setHasHistoricalData] = useState(false);
   const [rankings, setRankings] = useState<BookWithRanking[]>([]);
   const [availableDates, setAvailableDates] = useState<string[]>([]);
   const [currentDate, setCurrentDate] = useState<string | null>(null);
@@ -61,12 +61,6 @@ function BrowseContent() {
           ORDER BY display_name
         `);
         setLists(listsData);
-
-        // Check for historical data
-        const historicalCheck = await query<{ cnt: number }>(`
-          SELECT COUNT(*) as cnt FROM nyt_bestsellers.main.historical_rankings LIMIT 1
-        `).catch(() => [{ cnt: 0 }]);
-        setHasHistoricalData(historicalCheck[0]?.cnt > 0);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load lists');
       } finally {
@@ -89,134 +83,76 @@ function BrowseContent() {
       setError(null);
 
       try {
-        // Check if this is the historical list
-        const isHistorical = selectedList === 'hardcover-fiction-historical';
         const pageSize = 15;
         const offset = (page - 1) * pageSize;
 
-        if (isHistorical) {
-          // Fetch historical data
-          let dateToUse = selectedDate;
+        // Use all_rankings view for unified access to API + historical data
+        let dateToUse = selectedDate;
 
-          if (selectedDate === 'latest') {
-            const latestResult = await query<{ max_week: string }>(`
-              SELECT MAX(week)::VARCHAR as max_week FROM nyt_bestsellers.main.historical_rankings
-            `);
-            dateToUse = latestResult[0]?.max_week || '';
-          }
-
-          // Get available dates (sample of years)
-          const datesResult = await query<{ week: string }>(`
-            SELECT DISTINCT week::VARCHAR as week
-            FROM nyt_bestsellers.main.historical_rankings
-            ORDER BY week DESC
-            LIMIT 100
+        if (selectedDate === 'latest') {
+          const latestResult = await query<{ max_date: string }>(`
+            SELECT MAX(published_date)::VARCHAR as max_date
+            FROM nyt_bestsellers.main.all_rankings
+            WHERE list_name = '${escapeSQL(selectedList)}'
           `);
-          setAvailableDates(datesResult.map(d => d.week));
-          setCurrentDate(dateToUse);
-
-          // Get rankings
-          const countResult = await query<{ total: number }>(`
-            SELECT COUNT(*) as total FROM nyt_bestsellers.main.historical_rankings
-            WHERE week = '${escapeSQL(dateToUse)}'
-          `);
-          const total = countResult[0]?.total || 0;
-
-          const rankingsData = await query<BookWithRanking>(`
-            SELECT
-              CAST(title_id AS VARCHAR) as primary_isbn13,
-              NULL as primary_isbn10,
-              title,
-              author,
-              '' as publisher,
-              '' as description,
-              NULL as book_image,
-              NULL as amazon_product_url,
-              rank,
-              0 as rank_last_week,
-              0 as weeks_on_list,
-              week::VARCHAR as published_date,
-              'hardcover-fiction-historical' as list_name_encoded,
-              'Hardcover Fiction (Historical)' as display_name
-            FROM nyt_bestsellers.main.historical_rankings
-            WHERE week = '${escapeSQL(dateToUse)}'
-            ORDER BY rank
-            LIMIT ${pageSize} OFFSET ${offset}
-          `);
-
-          setRankings(rankingsData);
-          setPagination({
-            page,
-            pageSize,
-            total,
-            totalPages: Math.ceil(total / pageSize)
-          });
-        } else {
-          // Fetch current API data
-          let dateToUse = selectedDate;
-
-          if (selectedDate === 'latest') {
-            const latestResult = await query<{ max_date: string }>(`
-              SELECT MAX(published_date)::VARCHAR as max_date
-              FROM nyt_bestsellers.main.rankings
-              WHERE list_name_encoded = '${escapeSQL(selectedList)}'
-            `);
-            dateToUse = latestResult[0]?.max_date || '';
-          }
-
-          // Get available dates
-          const datesResult = await query<{ published_date: string }>(`
-            SELECT DISTINCT published_date::VARCHAR as published_date
-            FROM nyt_bestsellers.main.rankings
-            WHERE list_name_encoded = '${escapeSQL(selectedList)}'
-            ORDER BY published_date DESC
-            LIMIT 52
-          `);
-          setAvailableDates(datesResult.map(d => d.published_date));
-          setCurrentDate(dateToUse);
-
-          // Get total count
-          const countResult = await query<{ total: number }>(`
-            SELECT COUNT(*) as total FROM nyt_bestsellers.main.rankings
-            WHERE list_name_encoded = '${escapeSQL(selectedList)}'
-            AND published_date = '${escapeSQL(dateToUse)}'
-          `);
-          const total = countResult[0]?.total || 0;
-
-          // Get rankings with book details
-          const rankingsData = await query<BookWithRanking>(`
-            SELECT
-              b.primary_isbn13,
-              b.primary_isbn10,
-              b.title,
-              b.author,
-              b.publisher,
-              b.description,
-              b.book_image,
-              b.amazon_product_url,
-              r.rank,
-              r.rank_last_week,
-              r.weeks_on_list,
-              r.published_date::VARCHAR as published_date,
-              r.list_name_encoded,
-              l.display_name
-            FROM nyt_bestsellers.main.rankings r
-            JOIN nyt_bestsellers.main.books b ON r.primary_isbn13 = b.primary_isbn13
-            LEFT JOIN nyt_bestsellers.main.lists l ON r.list_name_encoded = l.list_name_encoded
-            WHERE r.list_name_encoded = '${escapeSQL(selectedList)}'
-            AND r.published_date = '${escapeSQL(dateToUse)}'
-            ORDER BY r.rank
-            LIMIT ${pageSize} OFFSET ${offset}
-          `);
-
-          setRankings(rankingsData);
-          setPagination({
-            page,
-            pageSize,
-            total,
-            totalPages: Math.ceil(total / pageSize)
-          });
+          dateToUse = latestResult[0]?.max_date || '';
         }
+
+        // Get available dates for this list
+        const datesResult = await query<{ published_date: string }>(`
+          SELECT DISTINCT published_date::VARCHAR as published_date
+          FROM nyt_bestsellers.main.all_rankings
+          WHERE list_name = '${escapeSQL(selectedList)}'
+          ORDER BY published_date DESC
+          LIMIT 200
+        `);
+        setAvailableDates(datesResult.map(d => d.published_date));
+        setCurrentDate(dateToUse);
+
+        // Get total count
+        const countResult = await query<{ total: number }>(`
+          SELECT COUNT(*) as total
+          FROM nyt_bestsellers.main.all_rankings
+          WHERE list_name = '${escapeSQL(selectedList)}'
+          AND published_date = '${escapeSQL(dateToUse)}'
+        `);
+        const total = countResult[0]?.total || 0;
+
+        // Get rankings from unified view
+        // Join with books table to get additional details when available
+        const rankingsData = await query<BookWithRanking>(`
+          SELECT
+            COALESCE(b.primary_isbn13, ar.isbn, '') as primary_isbn13,
+            b.primary_isbn10,
+            ar.title,
+            ar.author,
+            COALESCE(b.publisher, '') as publisher,
+            COALESCE(b.description, '') as description,
+            b.book_image,
+            b.amazon_product_url,
+            ar.rank,
+            COALESCE(ar.rank_last_week, 0) as rank_last_week,
+            COALESCE(ar.weeks_on_list, 0) as weeks_on_list,
+            ar.published_date::VARCHAR as published_date,
+            ar.list_name as list_name_encoded,
+            l.display_name,
+            ar.source
+          FROM nyt_bestsellers.main.all_rankings ar
+          LEFT JOIN nyt_bestsellers.main.books b ON ar.isbn = b.primary_isbn13
+          LEFT JOIN nyt_bestsellers.main.lists l ON ar.list_name = l.list_name_encoded
+          WHERE ar.list_name = '${escapeSQL(selectedList)}'
+          AND ar.published_date = '${escapeSQL(dateToUse)}'
+          ORDER BY ar.rank
+          LIMIT ${pageSize} OFFSET ${offset}
+        `);
+
+        setRankings(rankingsData);
+        setPagination({
+          page,
+          pageSize,
+          total,
+          totalPages: Math.ceil(total / pageSize)
+        });
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load rankings');
       } finally {
@@ -263,6 +199,9 @@ function BrowseContent() {
         <h1 className="text-xl sm:text-2xl font-bold text-gray-900 dark:text-white">
           Browse Bestsellers
         </h1>
+        <p className="text-sm text-gray-600 dark:text-gray-400 mt-1">
+          Data from 1931 to present
+        </p>
       </header>
 
       {/* Connection Error */}
@@ -290,13 +229,9 @@ function BrowseContent() {
             {lists.map((list) => (
               <option key={list.list_name_encoded} value={list.list_name_encoded}>
                 {list.display_name}
+                {list.list_name_encoded === 'hardcover-fiction' ? ' (1931-present)' : ''}
               </option>
             ))}
-            {hasHistoricalData && (
-              <option value="hardcover-fiction-historical">
-                Hardcover Fiction (Historical 1931-2020)
-              </option>
-            )}
           </select>
         </div>
 
@@ -304,7 +239,7 @@ function BrowseContent() {
         {selectedList && availableDates.length > 0 && (
           <div>
             <label htmlFor="date-select" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-              Select Date
+              Select Date ({availableDates.length} weeks available)
             </label>
             <select
               id="date-select"
@@ -354,13 +289,18 @@ function BrowseContent() {
                 month: 'long',
                 day: 'numeric'
               })}
+              {rankings[0]?.source === 'historical_csv' && (
+                <span className="ml-2 text-xs bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 px-2 py-0.5 rounded">
+                  Historical Data
+                </span>
+              )}
             </p>
           )}
 
           {/* Book Cards */}
           <div className="space-y-4">
             {rankings.map((book) => (
-              <BookCard key={`${book.primary_isbn13}-${book.rank}`} book={book} />
+              <BookCard key={`${book.primary_isbn13 || book.title}-${book.rank}`} book={book} />
             ))}
           </div>
 
@@ -410,6 +350,9 @@ function BrowseContent() {
           </div>
           <p className="text-gray-600 dark:text-gray-400">
             Select a bestseller list to view rankings
+          </p>
+          <p className="text-sm text-gray-500 dark:text-gray-500 mt-1">
+            Hardcover Fiction has data back to 1931
           </p>
         </div>
       )}
