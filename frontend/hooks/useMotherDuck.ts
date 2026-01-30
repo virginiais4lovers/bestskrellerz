@@ -43,28 +43,22 @@ export function useMotherDuck() {
 
   const query = useCallback(async <T = Record<string, unknown>>(sql: string): Promise<T[]> => {
     const conn = await getConnection();
+
+    // evaluateQuery throws on error, so we use try/catch
     const result = await conn.evaluateQuery(sql);
 
-    if (result.status === 'error') {
-      throw new Error(`Query failed: ${result.err}`);
-    }
+    // Use toRows() to get data as plain objects
+    const rows = result.data.toRows();
 
-    // Convert Arrow table to plain objects
-    const rows: T[] = [];
-    const table = result.data;
-
-    for (let i = 0; i < table.numRows; i++) {
-      const row: Record<string, unknown> = {};
-      for (const field of table.schema.fields) {
-        const column = table.getChild(field.name);
-        const value = column?.get(i);
+    // Convert DuckDBRow to plain objects and handle BigInt
+    return rows.map(row => {
+      const obj: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(row)) {
         // Convert BigInt to number for JSON compatibility
-        row[field.name] = typeof value === 'bigint' ? Number(value) : value;
+        obj[key] = typeof value === 'bigint' ? Number(value) : value;
       }
-      rows.push(row as T);
-    }
-
-    return rows;
+      return obj as T;
+    });
   }, []);
 
   return { isReady, error, query };
