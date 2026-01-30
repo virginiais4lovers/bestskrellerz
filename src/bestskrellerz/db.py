@@ -218,6 +218,46 @@ def get_all_list_names(conn: duckdb.DuckDBPyConnection) -> list[str]:
     return [row[0] for row in result]
 
 
+def init_unified_view(conn: duckdb.DuckDBPyConnection) -> None:
+    """
+    Create a unified view combining rankings and historical_rankings.
+
+    This view provides a consistent interface to query all bestseller data
+    regardless of source, with columns:
+    - published_date, rank, title, author, list_name, isbn, source
+    """
+    conn.execute("""
+        CREATE OR REPLACE VIEW all_rankings AS
+        SELECT
+            r.published_date,
+            r.rank,
+            b.title,
+            b.author,
+            r.list_name_encoded AS list_name,
+            r.primary_isbn13 AS isbn,
+            r.rank_last_week,
+            r.weeks_on_list,
+            'api' AS source
+        FROM rankings r
+        LEFT JOIN books b ON r.primary_isbn13 = b.primary_isbn13
+
+        UNION ALL
+
+        SELECT
+            h.week AS published_date,
+            h.rank,
+            h.title,
+            h.author,
+            'hardcover-fiction' AS list_name,
+            h.oclc_isbn AS isbn,
+            NULL AS rank_last_week,
+            NULL AS weeks_on_list,
+            'historical_csv' AS source
+        FROM historical_rankings h
+        WHERE h.week < '2008-06-15'  -- Exclude overlap period, prefer API data
+    """)
+
+
 def init_historical_schema(conn: duckdb.DuckDBPyConnection) -> None:
     """
     Create the historical_rankings table for CSV import data.

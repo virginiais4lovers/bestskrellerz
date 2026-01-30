@@ -285,6 +285,26 @@ def fetch_history(start_date: Optional[datetime], weeks: int, max_requests: int)
         sys.exit(1)
 
 
+@cli.command("create-unified-view")
+def create_unified_view():
+    """Create a unified view combining rankings and historical data.
+
+    Creates the 'all_rankings' view which unions the rankings table (from API)
+    with historical_rankings (from CSV), avoiding duplicates by excluding
+    historical data that overlaps with API data.
+    """
+    click.echo("Creating unified view...")
+    try:
+        conn = db.get_connection()
+        db.init_unified_view(conn)
+        conn.close()
+        click.echo("Created 'all_rankings' view successfully.")
+        click.echo("Query it with: SELECT * FROM all_rankings WHERE list_name = 'hardcover-fiction' LIMIT 10")
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
 @cli.command("import-csv")
 @click.argument("csv_path", type=click.Path(exists=True))
 def import_csv(csv_path: str):
