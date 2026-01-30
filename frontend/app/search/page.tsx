@@ -20,6 +20,8 @@ interface SearchResult {
   description: string | null;
   book_image: string | null;
   amazon_product_url: string | null;
+  series_name: string | null;
+  series_order: number | null;
 }
 
 interface AppearanceDate {
@@ -116,9 +118,12 @@ function SearchContent() {
             MAX(b.publisher) as publisher,
             MAX(b.description) as description,
             MAX(b.book_image) as book_image,
-            MAX(b.amazon_product_url) as amazon_product_url
+            MAX(b.amazon_product_url) as amazon_product_url,
+            MAX(s.series_name) as series_name,
+            MAX(s.series_order) as series_order
           FROM nyt_bestsellers.main.all_rankings ar
           LEFT JOIN nyt_bestsellers.main.books b ON ar.isbn = b.primary_isbn13
+          LEFT JOIN nyt_bestsellers.main.book_series s ON ar.title = s.title AND ar.author = s.author
           WHERE ${whereClause}
           GROUP BY ar.title, ar.author
           ORDER BY appearance_count DESC
@@ -299,6 +304,15 @@ function SearchContent() {
                   <div key={`${key}-${idx}`} className="space-y-2">
                     <BookCard book={toBookWithRanking(result)} showList={false} />
                     <div className="ml-28 sm:ml-36">
+                      {/* Series Info */}
+                      {result.series_name && (
+                        <div className="text-xs text-purple-600 dark:text-purple-400 mb-1">
+                          {result.series_order
+                            ? `Book ${result.series_order} of ${result.series_name}`
+                            : `Part of ${result.series_name}`
+                          }
+                        </div>
+                      )}
                       <button
                         onClick={() => fetchAppearanceDates(result.title, result.author)}
                         className="text-xs text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 flex items-center gap-1"
