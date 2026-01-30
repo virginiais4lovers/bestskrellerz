@@ -1,12 +1,19 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
-import { MDConnection } from '@motherduck/wasm-client';
+import { useState, useEffect, useCallback, useRef } from 'react';
 
-let globalConnection: MDConnection | null = null;
-let initPromise: Promise<MDConnection> | null = null;
+// Dynamically import MotherDuck only on client side
+type MDConnectionType = import('@motherduck/wasm-client').MDConnection;
 
-async function getConnection(): Promise<MDConnection> {
+let globalConnection: MDConnectionType | null = null;
+let initPromise: Promise<MDConnectionType> | null = null;
+
+async function getConnection(): Promise<MDConnectionType> {
+  // Only run in browser
+  if (typeof window === 'undefined') {
+    throw new Error('MotherDuck SDK requires browser environment');
+  }
+
   if (globalConnection) {
     return globalConnection;
   }
@@ -22,6 +29,9 @@ async function getConnection(): Promise<MDConnection> {
       throw new Error('NEXT_PUBLIC_MOTHERDUCK_TOKEN is required');
     }
 
+    // Dynamic import to avoid SSR issues
+    const { MDConnection } = await import('@motherduck/wasm-client');
+
     const conn = MDConnection.create({ mdToken: token });
     await conn.isInitialized();
     globalConnection = conn;
@@ -34,17 +44,31 @@ async function getConnection(): Promise<MDConnection> {
 export function useMotherDuck() {
   const [isReady, setIsReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const mounted = useRef(true);
 
   useEffect(() => {
+    mounted.current = true;
+
+    // Only initialize in browser
+    if (typeof window === 'undefined') return;
+
     getConnection()
-      .then(() => setIsReady(true))
-      .catch((err) => setError(err.message));
+      .then(() => {
+        if (mounted.current) setIsReady(true);
+      })
+      .catch((err) => {
+        if (mounted.current) setError(err.message);
+      });
+
+    return () => {
+      mounted.current = false;
+    };
   }, []);
 
   const query = useCallback(async <T = Record<string, unknown>>(sql: string): Promise<T[]> => {
     const conn = await getConnection();
 
-    // evaluateQuery throws on error, so we use try/catch
+    // evaluateQuery throws on error
     const result = await conn.evaluateQuery(sql);
 
     // Use toRows() to get data as plain objects
