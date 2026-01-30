@@ -45,7 +45,7 @@ function BrowseContent() {
   const [isLoadingRankings, setIsLoadingRankings] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const selectedList = searchParams.get('list') || '';
+  const selectedList = searchParams.get('list') || 'hardcover-fiction';
   const selectedDate = searchParams.get('date') || 'latest';
   const selectedYear = searchParams.get('year') || '';
   const page = parseInt(searchParams.get('page') || '1', 10);
