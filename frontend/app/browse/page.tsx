@@ -1,5 +1,8 @@
 'use client';
 
+// Disable static generation - WASM SDK requires browser environment
+export const dynamic = 'force-dynamic';
+
 import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import BookCard from '@/components/BookCard';
