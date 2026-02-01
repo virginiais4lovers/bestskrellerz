@@ -29,6 +29,7 @@ interface BookWithRanking {
   list_name_encoded: string;
   display_name?: string;
   source?: string;
+  series_name?: string | null;
 }
 
 function BrowseContent() {
@@ -46,8 +47,10 @@ function BrowseContent() {
   const [error, setError] = useState<string | null>(null);
 
   const selectedList = searchParams.get('list') || 'hardcover-fiction';
-  const selectedDate = searchParams.get('date') || 'latest';
-  const selectedYear = searchParams.get('year') || '';
+  const selectedDate = searchParams.get('date') || '';  // Empty = show all weeks aggregated
+  const fromYear = searchParams.get('fromYear') || '';
+  const toYear = searchParams.get('toYear') || '';
+  const excludeSeries = searchParams.get('excludeSeries') === 'true';
   const page = parseInt(searchParams.get('page') || '1', 10);
 
   // Extract unique years from all dates
@@ -60,12 +63,23 @@ function BrowseContent() {
     return Array.from(years).sort((a, b) => b - a); // Sort descending
   }, [allDates]);
 
-  // Filter dates by selected year
+  // Filter dates by year range
   const filteredDates = useMemo(() => {
-    if (!selectedYear) return allDates.slice(0, 52); // Show latest 52 weeks if no year selected
-    const yearNum = parseInt(selectedYear, 10);
-    return allDates.filter(date => new Date(date).getFullYear() === yearNum);
-  }, [allDates, selectedYear]);
+    let dates = allDates;
+
+    if (fromYear || toYear) {
+      const fromNum = fromYear ? parseInt(fromYear, 10) : 0;
+      const toNum = toYear ? parseInt(toYear, 10) : 9999;
+
+      dates = allDates.filter(date => {
+        const year = new Date(date).getFullYear();
+        return year >= fromNum && year <= toNum;
+      });
+    }
+
+    // Limit to 52 weeks if showing all
+    return dates.slice(0, 104);
+  }, [allDates, fromYear, toYear]);
 
   // Fetch lists on mount
   useEffect(() => {
@@ -128,70 +142,126 @@ function BrowseContent() {
         const pageSize = 15;
         const offset = (page - 1) * pageSize;
 
-        // Determine which date to use
-        let dateToUse = selectedDate;
+        // Build WHERE clause for series exclusion
+        const seriesFilter = excludeSeries
+          ? "AND (b.series_name IS NULL OR b.series_name = '')"
+          : '';
 
-        if (selectedDate === 'latest') {
-          // If year is selected, use latest date from that year
-          if (selectedYear && filteredDates.length > 0) {
-            dateToUse = filteredDates[0];
-          } else if (allDates.length > 0) {
-            dateToUse = allDates[0];
-          } else {
-            const latestResult = await query<{ max_date: string }>(`
-              SELECT MAX(published_date)::VARCHAR as max_date
-              FROM nyt_bestsellers.main.all_rankings
-              WHERE list_name = '${escapeSQL(selectedList)}'
-            `);
-            dateToUse = latestResult[0]?.max_date || '';
-          }
+        // Build date range filter
+        let dateFilter = '';
+        if (fromYear) {
+          dateFilter += ` AND ar.published_date >= '${escapeSQL(fromYear)}-01-01'`;
+        }
+        if (toYear) {
+          dateFilter += ` AND ar.published_date <= '${escapeSQL(toYear)}-12-31'`;
         }
 
-        setCurrentDate(dateToUse);
+        if (selectedDate) {
+          // Specific week selected - show that week's rankings
+          setCurrentDate(selectedDate);
 
-        // Get total count
-        const countResult = await query<{ total: number }>(`
-          SELECT COUNT(*) as total
-          FROM nyt_bestsellers.main.all_rankings
-          WHERE list_name = '${escapeSQL(selectedList)}'
-          AND published_date = '${escapeSQL(dateToUse)}'
-        `);
-        const total = countResult[0]?.total || 0;
+          // Get total count
+          const countResult = await query<{ total: number }>(`
+            SELECT COUNT(*) as total
+            FROM nyt_bestsellers.main.all_rankings ar
+            LEFT JOIN nyt_bestsellers.main.books b ON ar.isbn = b.primary_isbn13
+            WHERE ar.list_name = '${escapeSQL(selectedList)}'
+            AND ar.published_date = '${escapeSQL(selectedDate)}'
+            ${seriesFilter}
+          `);
+          const total = countResult[0]?.total || 0;
 
-        // Get rankings from unified view
-        const rankingsData = await query<BookWithRanking>(`
-          SELECT
-            COALESCE(b.primary_isbn13, ar.isbn, '') as primary_isbn13,
-            b.primary_isbn10,
-            ar.title,
-            ar.author,
-            COALESCE(b.publisher, '') as publisher,
-            COALESCE(b.description, '') as description,
-            b.book_image,
-            b.amazon_product_url,
-            ar.rank,
-            COALESCE(ar.rank_last_week, 0) as rank_last_week,
-            COALESCE(ar.weeks_on_list, 0) as weeks_on_list,
-            ar.published_date::VARCHAR as published_date,
-            ar.list_name as list_name_encoded,
-            l.display_name,
-            ar.source
-          FROM nyt_bestsellers.main.all_rankings ar
-          LEFT JOIN nyt_bestsellers.main.books b ON ar.isbn = b.primary_isbn13
-          LEFT JOIN nyt_bestsellers.main.lists l ON ar.list_name = l.list_name_encoded
-          WHERE ar.list_name = '${escapeSQL(selectedList)}'
-          AND ar.published_date = '${escapeSQL(dateToUse)}'
-          ORDER BY ar.rank
-          LIMIT ${pageSize} OFFSET ${offset}
-        `);
+          // Get rankings for specific week
+          const rankingsData = await query<BookWithRanking>(`
+            SELECT
+              COALESCE(b.primary_isbn13, ar.isbn, '') as primary_isbn13,
+              b.primary_isbn10,
+              ar.title,
+              ar.author,
+              COALESCE(b.publisher, '') as publisher,
+              COALESCE(b.description, '') as description,
+              b.book_image,
+              b.amazon_product_url,
+              ar.rank,
+              COALESCE(ar.rank_last_week, 0) as rank_last_week,
+              COALESCE(ar.weeks_on_list, 0) as weeks_on_list,
+              ar.published_date::VARCHAR as published_date,
+              ar.list_name as list_name_encoded,
+              l.display_name,
+              ar.source,
+              b.series_name
+            FROM nyt_bestsellers.main.all_rankings ar
+            LEFT JOIN nyt_bestsellers.main.books b ON ar.isbn = b.primary_isbn13
+            LEFT JOIN nyt_bestsellers.main.lists l ON ar.list_name = l.list_name_encoded
+            WHERE ar.list_name = '${escapeSQL(selectedList)}'
+            AND ar.published_date = '${escapeSQL(selectedDate)}'
+            ${seriesFilter}
+            ORDER BY ar.rank
+            LIMIT ${pageSize} OFFSET ${offset}
+          `);
 
-        setRankings(rankingsData);
-        setPagination({
-          page,
-          pageSize,
-          total,
-          totalPages: Math.ceil(total / pageSize)
-        });
+          setRankings(rankingsData);
+          setPagination({
+            page,
+            pageSize,
+            total,
+            totalPages: Math.ceil(total / pageSize)
+          });
+        } else {
+          // No specific week - show aggregated results ordered by weeks on list
+          setCurrentDate(null);
+
+          // Get total count of unique books in range
+          const countResult = await query<{ total: number }>(`
+            SELECT COUNT(*) as total FROM (
+              SELECT DISTINCT ar.title, ar.author
+              FROM nyt_bestsellers.main.all_rankings ar
+              LEFT JOIN nyt_bestsellers.main.books b ON ar.isbn = b.primary_isbn13
+              WHERE ar.list_name = '${escapeSQL(selectedList)}'
+              ${dateFilter}
+              ${seriesFilter}
+            )
+          `);
+          const total = countResult[0]?.total || 0;
+
+          // Get aggregated rankings - unique books ordered by total weeks on list
+          const rankingsData = await query<BookWithRanking>(`
+            SELECT
+              MAX(COALESCE(b.primary_isbn13, ar.isbn, '')) as primary_isbn13,
+              MAX(b.primary_isbn10) as primary_isbn10,
+              ar.title,
+              ar.author,
+              MAX(COALESCE(b.publisher, '')) as publisher,
+              MAX(COALESCE(b.description, '')) as description,
+              MAX(b.book_image) as book_image,
+              MAX(b.amazon_product_url) as amazon_product_url,
+              0 as rank,
+              0 as rank_last_week,
+              COUNT(*) as weeks_on_list,
+              MAX(ar.published_date)::VARCHAR as published_date,
+              ar.list_name as list_name_encoded,
+              MAX(l.display_name) as display_name,
+              MAX(ar.source) as source,
+              MAX(b.series_name) as series_name
+            FROM nyt_bestsellers.main.all_rankings ar
+            LEFT JOIN nyt_bestsellers.main.books b ON ar.isbn = b.primary_isbn13
+            LEFT JOIN nyt_bestsellers.main.lists l ON ar.list_name = l.list_name_encoded
+            WHERE ar.list_name = '${escapeSQL(selectedList)}'
+            ${dateFilter}
+            ${seriesFilter}
+            GROUP BY ar.title, ar.author, ar.list_name
+            ORDER BY weeks_on_list DESC, ar.title
+            LIMIT ${pageSize} OFFSET ${offset}
+          `);
+
+          setRankings(rankingsData);
+          setPagination({
+            page,
+            pageSize,
+            total,
+            totalPages: Math.ceil(total / pageSize)
+          });
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load rankings');
       } finally {
@@ -200,37 +270,60 @@ function BrowseContent() {
     };
 
     fetchRankings();
-  }, [isReady, query, selectedList, selectedDate, selectedYear, filteredDates, allDates, page]);
+  }, [isReady, query, selectedList, selectedDate, fromYear, toYear, excludeSeries, filteredDates, allDates, page]);
 
-  const handleListChange = (list: string) => {
+  const buildUrl = (overrides: Record<string, string | boolean | undefined>) => {
     const params = new URLSearchParams();
-    if (list) params.set('list', list);
-    router.push(`/browse?${params.toString()}`);
+
+    const list = overrides.list !== undefined ? overrides.list : selectedList;
+    const from = overrides.fromYear !== undefined ? overrides.fromYear : fromYear;
+    const to = overrides.toYear !== undefined ? overrides.toYear : toYear;
+    const date = overrides.date !== undefined ? overrides.date : selectedDate;
+    const exclude = overrides.excludeSeries !== undefined ? overrides.excludeSeries : excludeSeries;
+    const pg = overrides.page !== undefined ? overrides.page : page;
+
+    if (list) params.set('list', list as string);
+    if (from) params.set('fromYear', from as string);
+    if (to) params.set('toYear', to as string);
+    if (date && date !== 'latest') params.set('date', date as string);
+    if (exclude) params.set('excludeSeries', 'true');
+    if (pg && Number(pg) > 1) params.set('page', String(pg));
+
+    return `/browse?${params.toString()}`;
   };
 
-  const handleYearChange = (year: string) => {
-    const params = new URLSearchParams();
-    params.set('list', selectedList);
-    if (year) params.set('year', year);
-    // Reset to latest when year changes
-    router.push(`/browse?${params.toString()}`);
+  const handleListChange = (list: string) => {
+    router.push(buildUrl({ list, fromYear: '', toYear: '', date: '', page: '1' }));
+  };
+
+  const handleFromYearChange = (year: string) => {
+    // If fromYear > toYear, also update toYear
+    let newToYear = toYear;
+    if (year && toYear && parseInt(year, 10) > parseInt(toYear, 10)) {
+      newToYear = year;
+    }
+    router.push(buildUrl({ fromYear: year, toYear: newToYear, date: '', page: '1' }));
+  };
+
+  const handleToYearChange = (year: string) => {
+    // If toYear < fromYear, also update fromYear
+    let newFromYear = fromYear;
+    if (year && fromYear && parseInt(year, 10) < parseInt(fromYear, 10)) {
+      newFromYear = year;
+    }
+    router.push(buildUrl({ fromYear: newFromYear, toYear: year, date: '', page: '1' }));
+  };
+
+  const handleExcludeSeriesChange = (exclude: boolean) => {
+    router.push(buildUrl({ excludeSeries: exclude, page: '1' }));
   };
 
   const handleDateChange = (date: string) => {
-    const params = new URLSearchParams();
-    params.set('list', selectedList);
-    if (selectedYear) params.set('year', selectedYear);
-    if (date !== 'latest') params.set('date', date);
-    router.push(`/browse?${params.toString()}`);
+    router.push(buildUrl({ date, page: '1' }));
   };
 
   const handlePageChange = (newPage: number) => {
-    const params = new URLSearchParams();
-    params.set('list', selectedList);
-    if (selectedYear) params.set('year', selectedYear);
-    if (selectedDate !== 'latest') params.set('date', selectedDate);
-    if (newPage > 1) params.set('page', newPage.toString());
-    router.push(`/browse?${params.toString()}`);
+    router.push(buildUrl({ page: String(newPage) }));
   };
 
   if (isLoading || !isReady) {
@@ -284,45 +377,70 @@ function BrowseContent() {
           </select>
         </div>
 
-        {/* Year and Week Selectors */}
+        {/* Year Range Selectors */}
         {selectedList && availableYears.length > 0 && (
-          <div className="grid grid-cols-2 gap-4">
-            {/* Year Selector */}
-            <div>
-              <label htmlFor="year-select" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                Year
-              </label>
-              <select
-                id="year-select"
-                value={selectedYear}
-                onChange={(e) => handleYearChange(e.target.value)}
-                className="w-full px-4 py-3 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 text-gray-900 dark:text-white touch-manipulation"
-                style={{ minHeight: '44px' }}
-              >
-                <option value="">All years</option>
-                {availableYears.map((year) => (
-                  <option key={year} value={year}>
-                    {year}
-                  </option>
-                ))}
-              </select>
+          <>
+            <div className="grid grid-cols-2 gap-4">
+              {/* From Year */}
+              <div>
+                <label htmlFor="from-year-select" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  From Year
+                </label>
+                <select
+                  id="from-year-select"
+                  value={fromYear}
+                  onChange={(e) => handleFromYearChange(e.target.value)}
+                  className="w-full px-4 py-3 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 text-gray-900 dark:text-white touch-manipulation"
+                  style={{ minHeight: '44px' }}
+                >
+                  <option value="">All years</option>
+                  {availableYears.map((year) => (
+                    <option key={year} value={year}>
+                      {year}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* To Year */}
+              <div>
+                <label htmlFor="to-year-select" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  To Year
+                </label>
+                <select
+                  id="to-year-select"
+                  value={toYear}
+                  onChange={(e) => handleToYearChange(e.target.value)}
+                  className="w-full px-4 py-3 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 text-gray-900 dark:text-white touch-manipulation"
+                  style={{ minHeight: '44px' }}
+                >
+                  <option value="">All years</option>
+                  {availableYears.map((year) => (
+                    <option key={year} value={year}>
+                      {year}
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
 
             {/* Week Selector */}
             <div>
               <label htmlFor="date-select" className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                Week ({filteredDates.length} available)
+                Week ({filteredDates.length} available{fromYear || toYear ? ` in ${fromYear || '...'}-${toYear || '...'}` : ''})
               </label>
               <select
                 id="date-select"
-                value={selectedDate === 'latest' ? (filteredDates[0] || '') : selectedDate}
+                value={selectedDate}
                 onChange={(e) => handleDateChange(e.target.value)}
                 className="w-full px-4 py-3 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg focus:outline-none focus:ring-2 focus:ring-amber-500 text-gray-900 dark:text-white touch-manipulation"
                 style={{ minHeight: '44px' }}
               >
+                <option value="">All weeks (by total weeks on list)</option>
                 {filteredDates.map((date) => (
                   <option key={date} value={date}>
                     {new Date(date).toLocaleDateString('en-US', {
+                      year: 'numeric',
                       month: 'short',
                       day: 'numeric'
                     })}
@@ -330,7 +448,23 @@ function BrowseContent() {
                 ))}
               </select>
             </div>
-          </div>
+
+            {/* Exclude Series Toggle */}
+            <div className="flex items-center gap-3">
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={excludeSeries}
+                  onChange={(e) => handleExcludeSeriesChange(e.target.checked)}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-amber-500 dark:peer-focus:ring-amber-500 rounded-full peer dark:bg-gray-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all dark:border-gray-600 peer-checked:bg-amber-500"></div>
+              </label>
+              <span className="text-sm text-gray-700 dark:text-gray-300">
+                Exclude books in a series
+              </span>
+            </div>
+          </>
         )}
       </div>
 
@@ -351,22 +485,34 @@ function BrowseContent() {
       {/* Rankings */}
       {!isLoadingRankings && rankings.length > 0 && (
         <div className="space-y-4">
-          {/* Current Date Display */}
-          {currentDate && (
-            <p className="text-sm text-gray-600 dark:text-gray-400">
-              Showing rankings for {new Date(currentDate).toLocaleDateString('en-US', {
-                weekday: 'long',
-                year: 'numeric',
-                month: 'long',
-                day: 'numeric'
-              })}
-              {rankings[0]?.source === 'historical_csv' && (
-                <span className="ml-2 text-xs bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 px-2 py-0.5 rounded">
-                  Historical Data
-                </span>
-              )}
-            </p>
-          )}
+          {/* Current View Display */}
+          <p className="text-sm text-gray-600 dark:text-gray-400">
+            {currentDate ? (
+              <>
+                Showing rankings for {new Date(currentDate).toLocaleDateString('en-US', {
+                  weekday: 'long',
+                  year: 'numeric',
+                  month: 'long',
+                  day: 'numeric'
+                })}
+                {rankings[0]?.source === 'historical_csv' && (
+                  <span className="ml-2 text-xs bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 px-2 py-0.5 rounded">
+                    Historical Data
+                  </span>
+                )}
+              </>
+            ) : (
+              <>
+                Top bestsellers by weeks on list
+                {fromYear && toYear ? ` (${fromYear}-${toYear})` : fromYear ? ` (${fromYear}+)` : toYear ? ` (through ${toYear})` : ''}
+              </>
+            )}
+            {excludeSeries && (
+              <span className="ml-2 text-xs bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-400 px-2 py-0.5 rounded">
+                Standalones Only
+              </span>
+            )}
+          </p>
 
           {/* Book Cards */}
           <div className="space-y-4">
@@ -407,7 +553,10 @@ function BrowseContent() {
       {/* Empty State */}
       {!isLoadingRankings && selectedList && rankings.length === 0 && !error && (
         <div className="text-center py-12">
-          <p className="text-gray-600 dark:text-gray-400">No rankings found for this selection.</p>
+          <p className="text-gray-600 dark:text-gray-400">
+            No rankings found for this selection.
+            {excludeSeries && ' Try disabling "Exclude books in a series".'}
+          </p>
         </div>
       )}
 
