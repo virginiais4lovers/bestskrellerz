@@ -501,6 +501,74 @@ def fetch_series(batch_size: int, max_books: int, delay: float):
         sys.exit(1)
 
 
+@cli.command("backfill-books")
+def backfill_books():
+    """Create stub book records for historical titles missing from books table.
+
+    Historical rankings data (pre-2013) often lacks full book metadata.
+    This command creates minimal book records for these titles so that
+    series information can be attached via fetch-series.
+
+    Example:
+
+        bestskrellerz backfill-books
+    """
+    click.echo("Backfilling stub book records for historical titles...")
+    click.echo()
+
+    try:
+        conn = db.get_connection()
+
+        # Find titles in all_rankings that don't have book records
+        # Get unique ISBN -> title/author mappings, avoiding ISBN conflicts
+        query = """
+            INSERT OR IGNORE INTO books (primary_isbn13, title, author)
+            SELECT DISTINCT
+                ar.isbn as primary_isbn13,
+                ar.title,
+                ar.author
+            FROM all_rankings ar
+            LEFT JOIN books b ON ar.isbn = b.primary_isbn13
+            WHERE b.primary_isbn13 IS NULL
+              AND ar.isbn IS NOT NULL
+              AND LENGTH(ar.isbn) > 0
+        """
+
+        # First count how many unique ISBNs are missing
+        count_query = """
+            SELECT COUNT(DISTINCT ar.isbn) as cnt
+            FROM all_rankings ar
+            LEFT JOIN books b ON ar.isbn = b.primary_isbn13
+            WHERE b.primary_isbn13 IS NULL
+              AND ar.isbn IS NOT NULL
+              AND LENGTH(ar.isbn) > 0
+        """
+
+        result = conn.execute(count_query).fetchone()
+        to_insert = result[0] if result else 0
+
+        if to_insert == 0:
+            click.echo("No historical titles need backfilling.")
+            conn.close()
+            return
+
+        click.echo(f"Found {to_insert} historical ISBNs without book records")
+        click.echo("Inserting stub records (duplicates will be skipped)...")
+
+        conn.execute(query)
+        conn.close()
+
+        click.echo(f"Successfully created {to_insert} stub book records.")
+        click.echo()
+        click.echo("Next steps:")
+        click.echo("  1. Run 'bestskrellerz fetch-series' to add series info")
+        click.echo("  2. Push changes to update production")
+
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
 @cli.command()
 def status():
     """Show sync status and statistics."""
