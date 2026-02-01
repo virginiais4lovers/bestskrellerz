@@ -362,7 +362,8 @@ def import_csv(csv_path: str):
 def fetch_series(batch_size: int, max_books: int, delay: float):
     """Fetch series information from Wikidata for fiction books.
 
-    Queries Wikidata by book title to find series membership and position.
+    Uses ISBN-based lookup first (most reliable), then falls back to
+    title matching with US/UK variations and fuzzy search.
     Only processes books from fiction bestseller lists.
 
     Examples:
@@ -374,11 +375,12 @@ def fetch_series(batch_size: int, max_books: int, delay: float):
         bestskrellerz fetch-series --max-books 100
     """
     import time
-    from .wikidata import query_wikidata_batch_by_title
+    from .wikidata import query_wikidata_batch_by_isbn, query_wikidata_batch_by_title
 
     click.echo("Fetching series information from Wikidata...")
     click.echo(f"Batch size: {batch_size}")
     click.echo(f"Delay between requests: {delay}s")
+    click.echo("Strategy: ISBN lookup first, then title matching with variations")
     click.echo()
 
     try:
@@ -418,38 +420,67 @@ def fetch_series(batch_size: int, max_books: int, delay: float):
         # Process in batches
         total_found = 0
         total_processed = 0
+        isbn_hits = 0
+        title_hits = 0
 
         for i in range(0, len(books_to_process), batch_size):
             batch = books_to_process[i:i + batch_size]
-            titles = [title for _, title in batch]
-            isbn_map = {title: isbn for isbn, title in batch}
+            total_processed += len(batch)
 
-            click.echo(f"[{i + 1}-{min(i + batch_size, len(books_to_process))}/{len(books_to_process)}] Querying Wikidata...", nl=False)
+            click.echo(f"[{i + 1}-{min(i + batch_size, len(books_to_process))}/{len(books_to_process)}] ", nl=False)
 
             try:
-                results = query_wikidata_batch_by_title(titles)
-                total_processed += len(batch)
+                # Step 1: Try ISBN-based lookup first (most reliable)
+                isbn_list = [(isbn, isbn) for isbn, title in batch]
+                isbn_results = query_wikidata_batch_by_isbn(isbn_list)
 
-                if results:
-                    total_found += len(results)
-                    click.echo(f" found {len(results)} series")
+                found_isbns = set(isbn_results.keys())
+                batch_found = len(isbn_results)
+                isbn_hits += batch_found
 
-                    # Update database
-                    for title, info in results.items():
-                        isbn = isbn_map.get(title)
-                        if isbn:
-                            conn.execute("""
-                                UPDATE books
-                                SET series_name = ?,
-                                    series_position = ?,
-                                    wikidata_id = ?
-                                WHERE primary_isbn13 = ?
-                            """, [info.series_name, info.series_position, info.wikidata_id, isbn])
+                # Update database for ISBN matches
+                for isbn, info in isbn_results.items():
+                    conn.execute("""
+                        UPDATE books
+                        SET series_name = ?,
+                            series_position = ?,
+                            wikidata_id = ?
+                        WHERE primary_isbn13 = ?
+                    """, [info.series_name, info.series_position, info.wikidata_id, isbn])
+
+                # Step 2: For books not found by ISBN, try title matching
+                remaining = [(isbn, title) for isbn, title in batch if isbn not in found_isbns]
+
+                if remaining:
+                    titles = [title for _, title in remaining]
+                    isbn_map = {title: isbn for isbn, title in remaining}
+
+                    title_results = query_wikidata_batch_by_title(titles)
+
+                    if title_results:
+                        title_hits += len(title_results)
+                        batch_found += len(title_results)
+
+                        for title, info in title_results.items():
+                            isbn = isbn_map.get(title)
+                            if isbn:
+                                conn.execute("""
+                                    UPDATE books
+                                    SET series_name = ?,
+                                        series_position = ?,
+                                        wikidata_id = ?
+                                    WHERE primary_isbn13 = ?
+                                """, [info.series_name, info.series_position, info.wikidata_id, isbn])
+
+                total_found += batch_found
+
+                if batch_found > 0:
+                    click.echo(f"found {batch_found} series (ISBN: {len(isbn_results)}, title: {batch_found - len(isbn_results)})")
                 else:
-                    click.echo(" no series found")
+                    click.echo("no series found")
 
             except Exception as e:
-                click.echo(f" error: {e}")
+                click.echo(f"error: {e}")
 
             # Rate limiting
             if i + batch_size < len(books_to_process):
@@ -461,6 +492,8 @@ def fetch_series(batch_size: int, max_books: int, delay: float):
         click.echo("=== Fetch Complete ===")
         click.echo(f"Books processed: {total_processed}")
         click.echo(f"Series found: {total_found}")
+        click.echo(f"  - Via ISBN lookup: {isbn_hits}")
+        click.echo(f"  - Via title matching: {title_hits}")
         click.echo(f"Hit rate: {total_found / total_processed * 100:.1f}%" if total_processed > 0 else "N/A")
 
     except Exception as e:
