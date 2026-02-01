@@ -119,11 +119,10 @@ function SearchContent() {
             MAX(b.description) as description,
             MAX(b.book_image) as book_image,
             MAX(b.amazon_product_url) as amazon_product_url,
-            MAX(s.series_name) as series_name,
-            MAX(s.series_order) as series_order
+            MAX(b.series_name) as series_name,
+            MAX(b.series_position) as series_order
           FROM nyt_bestsellers.main.all_rankings ar
           LEFT JOIN nyt_bestsellers.main.books b ON ar.isbn = b.primary_isbn13
-          LEFT JOIN nyt_bestsellers.main.book_series s ON ar.title = s.title AND ar.author = s.author
           WHERE ${whereClause}
           GROUP BY ar.title, ar.author
           ORDER BY appearance_count DESC
